@@ -6,7 +6,7 @@ import { devotionalsA } from "@/content/devotionals-a";
 import { devotionalsB } from "@/content/devotionals-b";
 import { devotionalsC } from "@/content/devotionals-c";
 import type { Devotional } from "@/content/types";
-import type { User } from "@supabase/supabase-js";
+import type { User, SupabaseClient } from "@supabase/supabase-js";
 
 export const Route = createFileRoute("/")({
   head: () => ({ meta: [{ title: "Devocional" }, { name: "description", content: "Um momento de fé, reflexão e palavras que aproximam." }] }),
@@ -21,6 +21,9 @@ type Reply = { id: string; note_id: string; author_id: string; body: string; cre
 const catalog: Devotional[] = [...devotionalsA, ...devotionalsB, ...devotionalsC].sort((a, b) => a.id - b.id);
 const emptyProgress: Progress = { read_done: false, reflect_done: false, pray_done: false, commitment_done: false, completed_at: null };
 const db = supabase;
+// The new request/approval RPCs are not yet included in Lovable-generated types.
+// Keep generated schema files untouched; database RLS enforces access server-side.
+const secureDb = supabase as unknown as SupabaseClient;
 
 function brasilDay(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
@@ -157,7 +160,7 @@ function DevocionalApp() {
         if (cancelled) return;
         setInvite(place?.invite_code ?? "");
         if (place?.created_by === user.id) {
-          const { data: requests, error: requestError } = await db.from("space_join_requests").select("*").eq("space_id", sid).eq("status", "pending").order("created_at", { ascending: true });
+          const { data: requests, error: requestError } = await secureDb.from("space_join_requests").select("*").eq("space_id", sid).eq("status", "pending").order("created_at", { ascending: true });
           if (requestError) setNotice(requestError.message);
           if (!cancelled) setJoinRequests(requests ?? []);
         } else setJoinRequests([]);
@@ -176,7 +179,7 @@ function DevocionalApp() {
         } else setReplies([]);
       } else {
         setInvite(""); setPartner(null); setOtherNote(null); setInbox([]); setReplies([]); setJoinRequests([]);
-        const { data: requests } = await db.from("space_join_requests").select("*").eq("requester_id", user.id).eq("status", "pending").order("created_at", { ascending: false }).limit(1);
+        const { data: requests } = await secureDb.from("space_join_requests").select("*").eq("requester_id", user.id).eq("status", "pending").order("created_at", { ascending: false }).limit(1);
         if (!cancelled) setMyJoinRequest(requests?.[0] ?? null);
       }
       if (!cancelled) setSaving(false);
@@ -256,7 +259,7 @@ function DevocionalApp() {
     if (localOnly) { setNotice("O compartilhamento precisa de uma conexão segura. Tente ativá-lo neste dispositivo."); return; }
     if (!profileName.trim() || profileName.trim() === "Você") { setNotice("Antes de solicitar acesso, escreva seu nome no perfil e salve."); return; }
     setBusy(true);
-    const { error } = await db.rpc("request_join_space", { _code: inviteInput.trim().toUpperCase() });
+    const { error } = await secureDb.rpc("request_join_space", { _code: inviteInput.trim().toUpperCase() });
     setBusy(false);
     if (error) setNotice(error.message);
     else { setInviteInput(""); setNotice("Pedido enviado! Peça para Vitor abrir Perfil e aprovar seu dispositivo."); await refresh(); }
@@ -266,8 +269,8 @@ function DevocionalApp() {
     if (approve && !window.confirm("Você conhece " + request.requester_name + " e confirma que este é o dispositivo da Duda? Depois de aprovar, esta pessoa poderá acessar as mensagens e os resumos compartilhados.")) return;
     setBusy(true);
     const { error } = approve
-      ? await db.rpc("approve_join_request", { _request_id: request.id })
-      : await db.rpc("decline_join_request", { _request_id: request.id });
+      ? await secureDb.rpc("approve_join_request", { _request_id: request.id })
+      : await secureDb.rpc("decline_join_request", { _request_id: request.id });
     setBusy(false);
     if (error) setNotice(error.message);
     else { setNotice(approve ? "Dispositivo aprovado. Agora vocês podem compartilhar mensagens e resumos." : "Pedido recusado."); await refresh(); }

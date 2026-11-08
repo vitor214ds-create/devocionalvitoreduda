@@ -14,13 +14,237 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      daily_progress: {
+        Row: {
+          commitment_done: boolean
+          completed_at: string | null
+          created_at: string
+          day: string
+          devotional_id: number
+          id: string
+          pray_done: boolean
+          read_done: boolean
+          reflect_done: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          commitment_done?: boolean
+          completed_at?: string | null
+          created_at?: string
+          day: string
+          devotional_id: number
+          id?: string
+          pray_done?: boolean
+          read_done?: boolean
+          reflect_done?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Update: {
+          commitment_done?: boolean
+          completed_at?: string | null
+          created_at?: string
+          day?: string
+          devotional_id?: number
+          id?: string
+          pray_done?: boolean
+          read_done?: boolean
+          reflect_done?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      journal_entries: {
+        Row: {
+          created_at: string
+          day: string
+          id: string
+          reflection: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          day: string
+          id?: string
+          reflection?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Update: {
+          created_at?: string
+          day?: string
+          id?: string
+          reflection?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      note_replies: {
+        Row: {
+          author_id: string
+          body: string
+          created_at: string
+          id: string
+          note_id: string
+        }
+        Insert: {
+          author_id?: string
+          body: string
+          created_at?: string
+          id?: string
+          note_id: string
+        }
+        Update: {
+          author_id?: string
+          body?: string
+          created_at?: string
+          id?: string
+          note_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "note_replies_note_id_fkey"
+            columns: ["note_id"]
+            isOneToOne: false
+            referencedRelation: "shared_notes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          display_name: string
+          id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          display_name?: string
+          id: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          display_name?: string
+          id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      shared_notes: {
+        Row: {
+          author_id: string
+          created_at: string
+          day: string
+          edited_at: string | null
+          id: string
+          message: string
+          shared_at: string | null
+          space_id: string | null
+          status: string
+          summary: string
+          updated_at: string
+        }
+        Insert: {
+          author_id?: string
+          created_at?: string
+          day: string
+          edited_at?: string | null
+          id?: string
+          message?: string
+          shared_at?: string | null
+          space_id?: string | null
+          status?: string
+          summary?: string
+          updated_at?: string
+        }
+        Update: {
+          author_id?: string
+          created_at?: string
+          day?: string
+          edited_at?: string | null
+          id?: string
+          message?: string
+          shared_at?: string | null
+          space_id?: string | null
+          status?: string
+          summary?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "shared_notes_space_id_fkey"
+            columns: ["space_id"]
+            isOneToOne: false
+            referencedRelation: "spaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      space_members: {
+        Row: {
+          joined_at: string
+          space_id: string
+          user_id: string
+        }
+        Insert: {
+          joined_at?: string
+          space_id: string
+          user_id: string
+        }
+        Update: {
+          joined_at?: string
+          space_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "space_members_space_id_fkey"
+            columns: ["space_id"]
+            isOneToOne: false
+            referencedRelation: "spaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      spaces: {
+        Row: {
+          created_at: string
+          created_by: string
+          id: string
+          invite_code: string
+        }
+        Insert: {
+          created_at?: string
+          created_by: string
+          id?: string
+          invite_code: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string
+          id?: string
+          invite_code?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      can_see_note: { Args: { _note: string }; Returns: boolean }
+      create_space: { Args: never; Returns: string }
+      has_shared_on: { Args: { _day: string }; Returns: boolean }
+      join_space: { Args: { _code: string }; Returns: string }
+      leave_unpaired_space: { Args: never; Returns: undefined }
+      my_space_id: { Args: never; Returns: string }
+      shares_space_with: { Args: { _other: string }; Returns: boolean }
     }
     Enums: {
       [_ in never]: never

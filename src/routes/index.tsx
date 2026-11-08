@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { BookOpen, Heart, Mail, CalendarDays, UserRound, LogOut, ChevronRight, Check, Copy, Send, Sparkles, Leaf, LockKeyhole, ArrowLeft, MessageCircle, PenLine, RefreshCw, Sun, NotebookPen } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { devotionalsA } from "@/content/devotionals-a";
@@ -131,7 +131,7 @@ function DevocionalApp() {
     setDay("");
     window.setTimeout(() => setDay(brasilDay()), 10);
   }
-  async function authenticate(event: React.FormEvent) {
+  async function authenticate(event: FormEvent) {
     event.preventDefault(); setBusy(true); setNotice("");
     try {
       if (authMode === "reset") {

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { BookOpen, Heart, Mail, CalendarDays, UserRound, LogOut, ChevronRight, Check, Copy, Send, Sparkles, Leaf, LockKeyhole, ArrowLeft, MessageCircle, PenLine, RefreshCw, Sun, NotebookPen } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { BookOpen, Heart, Mail, CalendarDays, UserRound, ChevronRight, Check, Copy, Send, Sparkles, Leaf, LockKeyhole, ArrowLeft, MessageCircle, PenLine, RefreshCw, Sun, NotebookPen } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { devotionalsA } from "@/content/devotionals-a";
 import { devotionalsB } from "@/content/devotionals-b";
@@ -36,15 +36,24 @@ function prettyDate(day: string) { return new Intl.DateTimeFormat("pt-BR", { dat
 function prettyShort(day: string) { return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short", timeZone: "UTC" }).format(new Date(day + "T12:00:00Z")); }
 function notifyError(error: unknown) { return error instanceof Error ? error.message : String(error); }
 
+function localRead<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem("devocional:" + key);
+    return raw ? JSON.parse(raw) as T : fallback;
+  } catch { return fallback; }
+}
+function localWrite(key: string, value: unknown) {
+  try { window.localStorage.setItem("devocional:" + key, JSON.stringify(value)); return true; }
+  catch { return false; }
+}
+
 function DevocionalApp() {
   const [user, setUser] = useState<User | null>(null);
   const [booting, setBooting] = useState(true);
   const [page, setPage] = useState<Page>("hoje");
   const [day, setDay] = useState("");
-  const [authMode, setAuthMode] = useState<"login" | "signup" | "reset">("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [signupName, setSignupName] = useState("");
+  const [localOnly, setLocalOnly] = useState(false);
   const [profileName, setProfileName] = useState("");
   const [invite, setInvite] = useState("");
   const [inviteInput, setInviteInput] = useState("");
@@ -71,8 +80,32 @@ function DevocionalApp() {
   useEffect(() => {
     setDay(brasilDay());
     let mounted = true;
-    supabase.auth.getUser().then(({ data }) => { if (mounted) { setUser(data.user); setBooting(false); } }).catch(() => { if (mounted) setBooting(false); });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => { if (mounted) { setUser(session?.user ?? null); setBooting(false); } });
+    const enterDirectly = async () => {
+      try {
+        const { data: sessionResult, error: sessionError } = await db.auth.getSession();
+        if (sessionError) throw sessionError;
+        let nextUser = sessionResult.session?.user ?? null;
+        if (!nextUser) {
+          const { data: anonResult, error: anonError } = await db.auth.signInAnonymously();
+          if (anonError || !anonResult.user) throw anonError ?? new Error("Não foi possível iniciar a sessão anônima.");
+          nextUser = anonResult.user;
+        }
+        if (mounted) { setUser(nextUser); setLocalOnly(false); }
+      } catch {
+        // If anonymous auth is not enabled or connectivity is unavailable,
+        // reading and private local journaling must still work without login.
+        if (mounted) {
+          setUser({ id: "local-guest", user_metadata: { display_name: "Você" } } as User);
+          setLocalOnly(true);
+        }
+      } finally {
+        if (mounted) setBooting(false);
+      }
+    };
+    void enterDirectly();
+    const { data: listener } = db.auth.onAuthStateChange((_event, session) => {
+      if (mounted && session?.user) { setUser(session.user); setLocalOnly(false); setBooting(false); }
+    });
     return () => { mounted = false; listener.subscription.unsubscribe(); };
   }, []);
 
@@ -81,6 +114,18 @@ function DevocionalApp() {
     let cancelled = false;
     const load = async () => {
       setSaving(true);
+      if (localOnly) {
+        const storedProgress = localRead<Progress>("progress:" + day, emptyProgress);
+        setProgress(storedProgress);
+        setProfileName(localRead<string>("name", "Você"));
+        setReflection(localRead<string>("journal:" + day, ""));
+        const draft = localRead<Pick<Note, "summary" | "message">>("note:" + day, { summary: "", message: "" });
+        setSummary(draft.summary); setMessage(draft.message); setMyNote(null);
+        const days = Object.keys(localStorage).filter((key) => key.startsWith("devocional:progress:")).map((key) => key.replace("devocional:progress:", ""));
+        setHistory(days.map((d) => ({ day: d, completed_at: localRead<Progress>("progress:" + d, emptyProgress).completed_at, read_done: localRead<Progress>("progress:" + d, emptyProgress).read_done })).sort((a,b) => b.day.localeCompare(a.day)));
+        setPartner(null); setSpaceId(null); setInvite(""); setInbox([]); setReplies([]); setOtherNote(null); setSaving(false);
+        return;
+      }
       const [{ data: profile }, { data: member }, { data: myProgress }, { data: journal }, { data: ownNote }, { data: oldProgress }] = await Promise.all([
         db.from("profiles").select("display_name").eq("id", user.id).maybeSingle(),
         db.from("space_members").select("space_id").eq("user_id", user.id).maybeSingle(),
@@ -124,29 +169,12 @@ function DevocionalApp() {
     };
     void load().catch((e) => { if (!cancelled) { setSaving(false); setNotice(notifyError(e)); } });
     return () => { cancelled = true; };
-  }, [user?.id, day]);
+  }, [user?.id, day, localOnly]);
 
   async function refresh() {
     if (!user) return;
     setDay("");
     window.setTimeout(() => setDay(brasilDay()), 10);
-  }
-  async function authenticate(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setNotice("");
-    try {
-      if (authMode === "reset") {
-        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
-        if (error) throw error;
-        setNotice("Enviamos as instruções de recuperação para seu e-mail.");
-      } else if (authMode === "signup") {
-        const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { display_name: signupName.trim() || "Pessoa querida" }, emailRedirectTo: window.location.origin } });
-        if (error) throw error;
-        setNotice(data.session ? "Conta criada! Que bom ter você aqui." : "Conta criada! Confirme seu e-mail para começar.");
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-      }
-    } catch (e) { setNotice(notifyError(e)); } finally { setBusy(false); }
   }
   async function updateProgress(field: keyof Omit<Progress, "completed_at">) {
     if (!user) return;
@@ -154,12 +182,20 @@ function DevocionalApp() {
     const done = next.read_done && next.reflect_done && next.pray_done;
     const completed_at = done ? (progress.completed_at ?? new Date().toISOString()) : null;
     setProgress({ ...next, completed_at });
+    if (localOnly) {
+      if (!localWrite("progress:" + day, { ...next, completed_at })) { setNotice("Não foi possível salvar neste dispositivo."); return; }
+      setHistory((previous) => [{ day, completed_at, read_done: next.read_done }, ...previous.filter((h) => h.day !== day)].sort((a, b) => b.day.localeCompare(a.day)));
+      if (done && !progress.completed_at) setNotice("Que bonito! O devocional de hoje foi concluído. ✨");
+      return;
+    }
     const { error } = await db.from("daily_progress").upsert({ user_id: user.id, day, devotional_id: devotional.id, ...next, completed_at }, { onConflict: "user_id,day" });
     if (error) { setProgress(progress); setNotice(error.message); }
     else if (done && !progress.completed_at) setNotice("Que bonito! O devocional de hoje foi concluído. ✨");
   }
   async function saveJournal() {
-    if (!user) return; setBusy(true);
+    if (!user) return;
+    if (localOnly) { setNotice(localWrite("journal:" + day, reflection) ? "Sua reflexão foi salva neste dispositivo." : "Não foi possível salvar neste dispositivo."); return; }
+    setBusy(true);
     const { error } = await db.from("journal_entries").upsert({ user_id: user.id, day, reflection }, { onConflict: "user_id,day" });
     setBusy(false); setNotice(error ? error.message : "Sua reflexão pessoal foi salva.");
   }
@@ -170,6 +206,7 @@ function DevocionalApp() {
     if (publish && !window.confirm("Compartilhar agora sua mensagem e seu resumo? A outra pessoa poderá ler depois de compartilhar o próprio registro.")) return;
     setBusy(true);
     const status = publish || myNote?.status === "shared" ? "shared" : "draft";
+    if (localOnly) { setBusy(false); setNotice(localWrite("note:" + day, { summary, message }) ? "Rascunho salvo neste dispositivo." : "Não foi possível salvar neste dispositivo."); return; }
     const { data, error } = await db.from("shared_notes").upsert({ author_id: user.id, day, summary, message, status }, { onConflict: "author_id,day" }).select("*").single();
     setBusy(false);
     if (error) { setNotice(error.message); return; }
@@ -178,7 +215,7 @@ function DevocionalApp() {
     if (status === "shared") await loadShared();
   }
   async function loadShared() {
-    if (!user || !spaceId) return;
+    if (!user || !spaceId || localOnly) return;
     const { data } = await db.from("shared_notes").select("*").eq("space_id", spaceId).eq("status", "shared").order("day", { ascending: false });
     setInbox(data ?? []);
     setOtherNote(data?.find((n) => n.day === day && n.author_id !== user.id) ?? null);
@@ -198,17 +235,27 @@ function DevocionalApp() {
     await loadShared();
   }
   async function createInvite() {
+    if (localOnly) { setNotice("O compartilhamento precisa de uma conexão segura. Tente ativá-lo neste dispositivo."); return; }
     setBusy(true); const { data, error } = await db.rpc("create_space");
     setBusy(false); if (error) setNotice(error.message); else { setInvite(String(data)); setNotice("Convite criado. Compartilhe o código com alguém especial."); await refresh(); }
   }
   async function joinInvite() {
+    if (localOnly) { setNotice("O compartilhamento precisa de uma conexão segura. Tente ativá-lo neste dispositivo."); return; }
     setBusy(true); const { error } = await db.rpc("join_space", { _code: inviteInput.trim().toUpperCase() });
     setBusy(false); if (error) setNotice(error.message); else { setNotice("Vocês estão conectados!"); await refresh(); }
   }
   async function updateName() {
     if (!user || !profileName.trim()) return;
+    if (localOnly) { setNotice(localWrite("name", profileName.trim()) ? "Seu nome foi salvo neste dispositivo." : "Não foi possível salvar neste dispositivo."); return; }
     setBusy(true); const { error } = await db.from("profiles").update({ display_name: profileName.trim() }).eq("id", user.id);
     setBusy(false); setNotice(error ? error.message : "Nome atualizado.");
+  }
+  async function retrySecureAccess() {
+    setBusy(true);
+    const { data, error } = await db.auth.signInAnonymously();
+    setBusy(false);
+    if (error || !data.user) { setNotice("O compartilhamento entre dispositivos ainda não está disponível. Suas leituras continuam acessíveis aqui."); return; }
+    setUser(data.user); setLocalOnly(false); setNotice("Seu espaço seguro foi ativado. Você já pode criar ou aceitar um convite.");
   }
   function copy(text: string) {
     if (!navigator.clipboard) { setNotice("Seu navegador não permite copiar automaticamente."); return; }
@@ -219,19 +266,6 @@ function DevocionalApp() {
 
   if (booting || !day) return <div className="dv-loading"><Leaf size={28} className="dv-spin" /><p>Preparando um momento especial...</p></div>;
 
-  if (!user) return <main className="dv-auth">
-    <div className="dv-auth-art"><div className="dv-art-inner"><span className="dv-kicker"><Sparkles size={15} /> UM MOMENTO SÓ SEU</span><h1>Pequenos encontros.<br /><em>Grandes transformações.</em></h1><p>Uma pausa para ouvir a Palavra, acolher o coração e guardar tudo aquilo que merece permanecer.</p><div className="dv-scripture">“Há tempo para todas as coisas.”<small>Eclesiastes 3:1 · paráfrase</small></div></div></div>
-    <div className="dv-auth-side"><form className="dv-auth-card" onSubmit={authenticate}><div className="dv-brand"><Leaf size={22} /> Devocional</div><span className="dv-kicker">SEJA BEM-VINDO(A)</span><h2>{authMode === "login" ? "Que bom ter você aqui." : authMode === "signup" ? "Vamos começar?" : "Recuperar acesso"}</h2><p>{authMode === "login" ? "Entre para continuar sua jornada." : authMode === "signup" ? "Crie seu espaço de paz e reflexão." : "Enviaremos um link para seu e-mail."}</p>
-      {authMode === "signup" && <label>Como podemos chamar você?<input required maxLength={60} value={signupName} onChange={(e) => setSignupName(e.target.value)} placeholder="Seu nome" /></label>}
-      <label>E-mail<input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="voce@exemplo.com" /></label>
-      {authMode !== "reset" && <label>Senha<input required minLength={6} type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Sua senha" /></label>}
-      <button className="dv-primary dv-wide" disabled={busy}>{busy ? "Um instante..." : authMode === "login" ? "Entrar" : authMode === "signup" ? "Criar minha conta" : "Enviar link"} <ChevronRight size={17} /></button>
-      {notice && <p role="status" className="dv-notice">{notice}</p>}
-      <div className="dv-auth-switch">{authMode === "login" ? <><button type="button" onClick={() => setAuthMode("signup")}>Criar uma conta</button><button type="button" onClick={() => setAuthMode("reset")}>Esqueci minha senha</button></> : <button type="button" onClick={() => setAuthMode("login")}>Já tenho uma conta · Entrar</button>}</div>
-      <small className="dv-muted"><LockKeyhole size={13} /> Suas palavras merecem um lugar seguro.</small>
-    </form></div>
-  </main>;
-
   const navigation: Array<{ key: Page; label: string; icon: typeof Heart }> = [
     { key: "hoje", label: "Hoje", icon: Sun }, { key: "leitura", label: "Devocional", icon: BookOpen }, { key: "diario", label: "Meu diário", icon: NotebookPen }, { key: "mensagens", label: "Mensagens", icon: Mail }, { key: "jornada", label: "Nossa jornada", icon: CalendarDays }, { key: "perfil", label: "Perfil", icon: UserRound },
   ];
@@ -239,10 +273,11 @@ function DevocionalApp() {
     <aside className="dv-sidebar"><button className="dv-brand dv-brand-button" onClick={() => go("hoje")}><Leaf size={25} /> Devocional</button><p className="dv-sidebar-eyebrow">UM DIA DE CADA VEZ</p>
       <nav aria-label="Navegação principal">{navigation.map(({ key, label, icon: Icon }) => <button key={key} className={"dv-nav " + (page === key ? "active" : "")} onClick={() => go(key)}><Icon size={19} />{label}{page === key && <span className="dv-nav-dot" />}</button>)}</nav>
       <div className="dv-side-note"><Sparkles size={18} /><p>Que a graça encontre espaço nos pequenos momentos de hoje.</p><small>Com carinho, Devocional</small></div>
-      <button className="dv-logout" onClick={() => void supabase.auth.signOut()}><LogOut size={17} /> Sair da conta</button>
+
     </aside>
     <div className="dv-main">
       <header className="dv-topbar"><div className="dv-toplogo"><Leaf size={18} /> Devocional</div><span><Sun size={15} /> {prettyDate(brasilDay())}</span><button className="dv-user" onClick={() => go("perfil")}><UserRound size={17} /> {firstName}</button></header>
+      {localOnly && <div className="dv-flash" role="status"><LockKeyhole size={16} /> Acesso direto: seus registros ficam neste dispositivo. O compartilhamento depende de ativar a conexão segura.</div>}
       {notice && <div className="dv-flash" role="status"><Sparkles size={16} /> {notice} <button aria-label="Fechar aviso" onClick={() => setNotice("")}>×</button></div>}
       <main className="dv-content">
         {page === "hoje" && <><div className="dv-greeting"><span className="dv-kicker">SEU MOMENTO COM DEUS · {prettyDate(day).toUpperCase()}</span><h1>Um bom dia começa <em>por dentro.</em></h1><p>Olá, {firstName}. Existe uma palavra reservada para este dia.</p></div>
@@ -260,7 +295,7 @@ function DevocionalApp() {
         {page === "diario" && <><div className="dv-pagehead"><span className="dv-kicker">UM LUGAR SÓ SEU</span><h1>Meu diário</h1><p>Palavras que você pode guardar sem precisar explicar a ninguém.</p></div><div className="dv-softcard"><div className="dv-row-between"><h3>{prettyDate(day)}</h3><LockKeyhole size={19} /></div><p className="dv-muted">Sua reflexão pessoal sobre “{devotional.title}”.</p><textarea className="dv-bigtext" rows={9} maxLength={5000} value={reflection} onChange={(e) => setReflection(e.target.value)} placeholder="Escreva aqui o que gostaria de lembrar..." /><div className="dv-readingfooter"><span className="dv-muted">Somente você tem acesso a este texto.</span><button className="dv-primary" disabled={busy} onClick={() => void saveJournal()}>Salvar reflexão <Check size={17} /></button></div></div><h3 className="dv-subheading">Revisitar outros dias</h3><HistoryList history={history} onSelect={(d) => { setDay(d); go("diario"); }} /></>}
         {page === "mensagens" && <><div className="dv-pagehead"><span className="dv-kicker">ENTRE NÓS</span><h1>Mensagens que ficam</h1><p>As palavras que foram compartilhadas com carinho, reunidas num só lugar.</p></div>{!partner ? <Empty icon={Mail} title="Uma história começa com um convite." body="Quando vocês estiverem conectados, as mensagens compartilhadas aparecerão aqui." action="Criar ou aceitar convite" onClick={() => go("perfil")} /> : inbox.length === 0 ? <Empty icon={Mail} title="Ainda não há mensagens." body="Depois do devocional de hoje, escreva seu resumo e uma palavra especial." action="Escrever primeira mensagem" onClick={() => { setReadingStep(3); go("leitura"); }} /> : <div className="dv-inbox">{inbox.map((note) => <NoteCard key={note.id} note={note} name={note.author_id === user.id ? "Você" : partner.name} me={user.id} replies={replies.filter((r) => r.note_id === note.id)} replyText={replyText[note.id] ?? ""} onChangeReply={(t) => setReplyText((r) => ({ ...r, [note.id]: t }))} onReply={() => void sendReply(note.id)} />)}</div>}<button className="dv-subtle dv-reload" onClick={() => void loadShared()}><RefreshCw size={16} /> Atualizar mensagens</button></>}
         {page === "jornada" && <><div className="dv-pagehead"><span className="dv-kicker">CADA DIA CONTA</span><h1>Nossa jornada</h1><p>Uma coleção de dias vividos com intenção.</p></div><div className="dv-stats"><div><strong>{history.filter((h) => h.completed_at).length}</strong><span>Devocionais concluídos</span></div><div><strong>{history.length}</strong><span>Dias registrados</span></div><div><strong>{inbox.length}</strong><span>Mensagens compartilhadas</span></div></div><section className="dv-softcard"><h3>Seus dias de luz</h3><p className="dv-muted">Toque em uma data para revisitar a leitura e suas anotações.</p><HistoryList history={history} onSelect={(d) => { setDay(d); setReadingStep(0); go("leitura"); }} /></section></>}
-        {page === "perfil" && <><div className="dv-pagehead"><span className="dv-kicker">SEU CANTINHO</span><h1>Perfil e convites</h1><p>Seu nome, seu espaço e as pessoas com quem você compartilha a jornada.</p></div><div className="dv-twocol"><section className="dv-softcard"><div className="dv-readingicon"><UserRound size={23} /></div><h3>Como podemos chamar você?</h3><label className="dv-formlabel">Nome<input value={profileName} maxLength={60} onChange={(e) => setProfileName(e.target.value)} /></label><p className="dv-muted">{user.email}</p><button className="dv-primary" onClick={() => void updateName()} disabled={busy}>Salvar nome <Check size={17} /></button></section><section className="dv-softcard dv-sage"><div className="dv-readingicon"><Heart size={23} /></div><h3>Nosso espaço</h3>{partner ? <><p>Seu espaço está conectado com <strong>{partner.name}</strong>.</p><p className="dv-muted"><LockKeyhole size={14} /> As mensagens são privadas para vocês.</p></> : invite ? <><p>Um espaço reservado foi criado. Compartilhe este código para convidar alguém.</p><div className="dv-invite">{invite} <button aria-label="Copiar convite" onClick={() => copy(invite)}><Copy size={18} /></button></div></> : <><p>Crie um espaço privativo para compartilhar reflexões e mensagens com uma pessoa.</p><button className="dv-primary" disabled={busy} onClick={() => void createInvite()}>Criar convite <ChevronRight size={17} /></button></>}{!spaceId && <div className="dv-join"><label className="dv-formlabel">Recebeu um convite?<input value={inviteInput} maxLength={11} onChange={(e) => setInviteInput(e.target.value.toUpperCase())} placeholder="XXXXX-XXXXX" /></label><button className="dv-subtle" disabled={busy || !inviteInput.trim()} onClick={() => void joinInvite()}>Entrar com código <ChevronRight size={16} /></button></div>}</section></div><button className="dv-subtle dv-reload" onClick={() => void supabase.auth.signOut()}><LogOut size={17} /> Sair da conta</button></>}
+        {page === "perfil" && <><div className="dv-pagehead"><span className="dv-kicker">SEU CANTINHO</span><h1>Perfil e convites</h1><p>Seu nome, seu espaço e as pessoas com quem você compartilha a jornada.</p></div><div className="dv-twocol"><section className="dv-softcard"><div className="dv-readingicon"><UserRound size={23} /></div><h3>Como podemos chamar você?</h3><label className="dv-formlabel">Nome<input value={profileName} maxLength={60} onChange={(e) => setProfileName(e.target.value)} /></label><p className="dv-muted">{localOnly ? "Anotações salvas neste dispositivo, sem necessidade de login." : "Acesso privado e sem senha."}</p><button className="dv-primary" onClick={() => void updateName()} disabled={busy}>Salvar nome <Check size={17} /></button></section><section className="dv-softcard dv-sage"><div className="dv-readingicon"><Heart size={23} /></div><h3>Nosso espaço</h3>{localOnly ? <><p>Para enviar mensagens entre dois dispositivos, é necessário ativar a conexão segura do aplicativo.</p><button className="dv-primary" disabled={busy} onClick={() => void retrySecureAccess()}>Ativar compartilhamento <ChevronRight size={17} /></button></> : partner ? <><p>Seu espaço está conectado com <strong>{partner.name}</strong>.</p><p className="dv-muted"><LockKeyhole size={14} /> As mensagens são privadas para vocês.</p></> : invite ? <><p>Um espaço reservado foi criado. Compartilhe este código para convidar alguém.</p><div className="dv-invite">{invite} <button aria-label="Copiar convite" onClick={() => copy(invite)}><Copy size={18} /></button></div></> : <><p>Crie um espaço privativo para compartilhar reflexões e mensagens com uma pessoa.</p><button className="dv-primary" disabled={busy} onClick={() => void createInvite()}>Criar convite <ChevronRight size={17} /></button></>}{!spaceId && !localOnly && <div className="dv-join"><label className="dv-formlabel">Recebeu um convite?<input value={inviteInput} maxLength={11} onChange={(e) => setInviteInput(e.target.value.toUpperCase())} placeholder="XXXXX-XXXXX" /></label><button className="dv-subtle" disabled={busy || !inviteInput.trim()} onClick={() => void joinInvite()}>Entrar com código <ChevronRight size={16} /></button></div>}</section></div></>}
       </main>
       <footer className="dv-footer"><Leaf size={16} /> Um dia de cada vez, com fé e intenção. <span>Feito com cuidado ♡</span></footer>
       <nav className="dv-mobile-nav" aria-label="Navegação móvel">{navigation.filter((n) => n.key !== "leitura").map(({ key, label, icon: Icon }) => <button key={key} className={page === key ? "selected" : ""} onClick={() => go(key)}><Icon size={21} /><span>{label === "Nossa jornada" ? "Jornada" : label === "Meu diário" ? "Diário" : label}</span></button>)}</nav>

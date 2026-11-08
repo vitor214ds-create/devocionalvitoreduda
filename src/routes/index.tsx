@@ -93,7 +93,7 @@ function DevocionalApp() {
         if (sessionError) throw sessionError;
         let nextUser = sessionResult.session?.user ?? null;
         if (!nextUser) {
-          const { data: anonResult, error: anonError } = await db.auth.signInAnonymously();
+          const { data: anonResult, error: anonError } = await db.auth.signInAnonymously({ options: { data: { display_name: "Você" } } });
           if (anonError || !anonResult.user) throw anonError ?? new Error("Não foi possível iniciar a sessão anônima.");
           nextUser = anonResult.user;
         }
@@ -283,7 +283,7 @@ function DevocionalApp() {
   }
   async function retrySecureAccess() {
     setBusy(true);
-    const { data, error } = await db.auth.signInAnonymously();
+    const { data, error } = await db.auth.signInAnonymously({ options: { data: { display_name: "Você" } } });
     setBusy(false);
     if (error || !data.user) { setNotice("O compartilhamento entre dispositivos ainda não está disponível. Suas leituras continuam acessíveis aqui."); return; }
     setUser(data.user); setLocalOnly(false); setNotice("Seu espaço seguro foi ativado. Você já pode criar ou aceitar um convite.");

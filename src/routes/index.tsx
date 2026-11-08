@@ -16,6 +16,7 @@ export const Route = createFileRoute("/")({
 type Page = "hoje" | "leitura" | "diario" | "mensagens" | "jornada" | "perfil";
 type Progress = { read_done: boolean; reflect_done: boolean; pray_done: boolean; commitment_done: boolean; completed_at: string | null };
 type Note = { id: string; author_id: string; day: string; summary: string; message: string; status: string; shared_at: string | null; edited_at: string | null };
+type JoinRequest = { id: string; space_id: string; requester_id: string; requester_name: string; status: string; created_at: string };
 type Reply = { id: string; note_id: string; author_id: string; body: string; created_at: string };
 const catalog: Devotional[] = [...devotionalsA, ...devotionalsB, ...devotionalsC].sort((a, b) => a.id - b.id);
 const emptyProgress: Progress = { read_done: false, reflect_done: false, pray_done: false, commitment_done: false, completed_at: null };
@@ -59,6 +60,9 @@ function DevocionalApp() {
   const [inviteInput, setInviteInput] = useState("");
   const [spaceId, setSpaceId] = useState<string | null>(null);
   const [partner, setPartner] = useState<{ id: string; name: string } | null>(null);
+  const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
+  const [myJoinRequest, setMyJoinRequest] = useState<JoinRequest | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [progress, setProgress] = useState<Progress>(emptyProgress);
   const [history, setHistory] = useState<Array<{ day: string; completed_at: string | null; read_done: boolean }>>([]);
   const [reflection, setReflection] = useState("");
@@ -123,7 +127,7 @@ function DevocionalApp() {
         setSummary(draft.summary); setMessage(draft.message); setMyNote(null);
         const days = Object.keys(localStorage).filter((key) => key.startsWith("devocional:progress:")).map((key) => key.replace("devocional:progress:", ""));
         setHistory(days.map((d) => ({ day: d, completed_at: localRead<Progress>("progress:" + d, emptyProgress).completed_at, read_done: localRead<Progress>("progress:" + d, emptyProgress).read_done })).sort((a,b) => b.day.localeCompare(a.day)));
-        setPartner(null); setSpaceId(null); setInvite(""); setInbox([]); setReplies([]); setOtherNote(null); setSaving(false);
+        setPartner(null); setSpaceId(null); setInvite(""); setInbox([]); setReplies([]); setOtherNote(null); setJoinRequests([]); setMyJoinRequest(null); setSaving(false);
         return;
       }
       const [{ data: profile }, { data: member }, { data: myProgress }, { data: journal }, { data: ownNote }, { data: oldProgress }] = await Promise.all([
@@ -146,12 +150,18 @@ function DevocionalApp() {
       setMyNote(ownNote ?? null);
       if (sid) {
         const [{ data: place }, { data: members }, { data: notes }] = await Promise.all([
-          db.from("spaces").select("invite_code").eq("id", sid).maybeSingle(),
+          db.from("spaces").select("invite_code, created_by").eq("id", sid).maybeSingle(),
           db.from("space_members").select("user_id").eq("space_id", sid),
           db.from("shared_notes").select("*").eq("space_id", sid).eq("status", "shared").order("day", { ascending: false }),
         ]);
         if (cancelled) return;
         setInvite(place?.invite_code ?? "");
+        if (place?.created_by === user.id) {
+          const { data: requests, error: requestError } = await db.from("space_join_requests").select("*").eq("space_id", sid).eq("status", "pending").order("created_at", { ascending: true });
+          if (requestError) setNotice(requestError.message);
+          if (!cancelled) setJoinRequests(requests ?? []);
+        } else setJoinRequests([]);
+        setMyJoinRequest(null);
         const theirId = members?.find((m) => m.user_id !== user.id)?.user_id;
         if (theirId) {
           const { data: theirProfile } = await db.from("profiles").select("display_name").eq("id", theirId).maybeSingle();
@@ -164,17 +174,20 @@ function DevocionalApp() {
           const { data: responseData } = await db.from("note_replies").select("*").in("note_id", notes.map((n) => n.id)).order("created_at");
           if (!cancelled) setReplies(responseData ?? []);
         } else setReplies([]);
-      } else { setInvite(""); setPartner(null); setOtherNote(null); setInbox([]); setReplies([]); }
+      } else {
+        setInvite(""); setPartner(null); setOtherNote(null); setInbox([]); setReplies([]); setJoinRequests([]);
+        const { data: requests } = await db.from("space_join_requests").select("*").eq("requester_id", user.id).eq("status", "pending").order("created_at", { ascending: false }).limit(1);
+        if (!cancelled) setMyJoinRequest(requests?.[0] ?? null);
+      }
       if (!cancelled) setSaving(false);
     };
     void load().catch((e) => { if (!cancelled) { setSaving(false); setNotice(notifyError(e)); } });
     return () => { cancelled = true; };
-  }, [user?.id, day, localOnly]);
+  }, [user?.id, day, localOnly, reloadKey]);
 
   async function refresh() {
     if (!user) return;
-    setDay("");
-    window.setTimeout(() => setDay(brasilDay()), 10);
+    setReloadKey((key) => key + 1);
   }
   async function updateProgress(field: keyof Omit<Progress, "completed_at">) {
     if (!user) return;
@@ -203,7 +216,7 @@ function DevocionalApp() {
     if (!user) return;
     if (publish && !partner) { setNotice("Conecte a outra pessoa para compartilhar."); return; }
     if (publish && !summary.trim() && !message.trim()) { setNotice("Escreva uma mensagem ou resumo primeiro."); return; }
-    if (publish && !window.confirm("Compartilhar agora sua mensagem e seu resumo? A outra pessoa poderá ler depois de compartilhar o próprio registro.")) return;
+    if (publish && !window.confirm("Compartilhar agora sua mensagem e seu resumo? A outra pessoa poderá ler e responder assim que você compartilhar.")) return;
     setBusy(true);
     const status = publish || myNote?.status === "shared" ? "shared" : "draft";
     if (localOnly) { setBusy(false); setNotice(localWrite("note:" + day, { summary, message }) ? "Rascunho salvo neste dispositivo." : "Não foi possível salvar neste dispositivo."); return; }
@@ -241,8 +254,23 @@ function DevocionalApp() {
   }
   async function joinInvite() {
     if (localOnly) { setNotice("O compartilhamento precisa de uma conexão segura. Tente ativá-lo neste dispositivo."); return; }
-    setBusy(true); const { error } = await db.rpc("join_space", { _code: inviteInput.trim().toUpperCase() });
-    setBusy(false); if (error) setNotice(error.message); else { setNotice("Vocês estão conectados!"); await refresh(); }
+    if (!profileName.trim() || profileName.trim() === "Você") { setNotice("Antes de solicitar acesso, escreva seu nome no perfil e salve."); return; }
+    setBusy(true);
+    const { error } = await db.rpc("request_join_space", { _code: inviteInput.trim().toUpperCase() });
+    setBusy(false);
+    if (error) setNotice(error.message);
+    else { setInviteInput(""); setNotice("Pedido enviado! Peça para Vitor abrir Perfil e aprovar seu dispositivo."); await refresh(); }
+  }
+  async function decideJoin(request: JoinRequest, approve: boolean) {
+    if (localOnly || !spaceId || partner) return;
+    if (approve && !window.confirm("Você conhece " + request.requester_name + " e confirma que este é o dispositivo da Duda? Depois de aprovar, esta pessoa poderá acessar as mensagens e os resumos compartilhados.")) return;
+    setBusy(true);
+    const { error } = approve
+      ? await db.rpc("approve_join_request", { _request_id: request.id })
+      : await db.rpc("decline_join_request", { _request_id: request.id });
+    setBusy(false);
+    if (error) setNotice(error.message);
+    else { setNotice(approve ? "Dispositivo aprovado. Agora vocês podem compartilhar mensagens e resumos." : "Pedido recusado."); await refresh(); }
   }
   async function updateName() {
     if (!user || !profileName.trim()) return;
@@ -263,6 +291,8 @@ function DevocionalApp() {
   }
   function go(newPage: Page) { setPage(newPage); setNotice(""); window.scrollTo?.({ top: 0, behavior: "smooth" }); }
   const firstName = profileName.trim().split(" ")[0] || "você";
+  const isVitor = profileName.trim().toLocaleLowerCase("pt-BR").startsWith("vitor");
+  const isDuda = profileName.trim().toLocaleLowerCase("pt-BR").startsWith("duda");
 
   if (booting || !day) return <div className="dv-loading"><Leaf size={28} className="dv-spin" /><p>Preparando um momento especial...</p></div>;
 
@@ -293,9 +323,11 @@ function DevocionalApp() {
           {readingStep === 3 && <section className="dv-readingcard"><div className="dv-readingicon"><Mail size={23} /></div><span className="dv-kicker">NOSSO ESPAÇO</span><h2>Palavras para guardar</h2><p>O que você viveu hoje merece ser lembrado. Escreva um resumo e, se desejar, uma mensagem especial. Seus rascunhos são somente seus.</p><label className="dv-formlabel">Resumo de hoje <span>· o que aprendi</span><textarea rows={5} maxLength={3000} value={summary} onChange={(e) => setSummary(e.target.value)} placeholder="Hoje entendi que..." /></label><label className="dv-formlabel">Uma mensagem para você <span>· uma palavra do coração</span><textarea rows={5} maxLength={3000} value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Quero te dizer que..." /></label><p className="dv-privacy"><LockKeyhole size={15} /> Nada é compartilhado sem sua escolha.</p><div className="dv-readingfooter"><button className="dv-subtle" disabled={busy} onClick={() => void saveNote(false)}><Check size={17} /> {myNote?.status === "shared" ? "Salvar edição" : "Salvar rascunho"}</button><button className="dv-primary" disabled={busy || !partner} onClick={() => void saveNote(true)}><Send size={16} /> {myNote?.status === "shared" ? "Atualizar mensagem" : "Compartilhar"}</button></div>{!partner && <p className="dv-muted">Para compartilhar, conecte alguém em <button className="dv-inline" onClick={() => go("perfil")}>Perfil e convites</button>.</p>}{myNote?.status === "shared" && <div className="dv-sent"><Check size={18} /> Sua mensagem foi compartilhada.</div>}{partner && otherNote && myNote?.status === "shared" && <NoteCard note={otherNote} name={partner.name} replies={replies.filter((r) => r.note_id === otherNote.id)} me={user.id} replyText={replyText[otherNote.id] ?? ""} onChangeReply={(t) => setReplyText((r) => ({ ...r, [otherNote.id]: t }))} onReply={() => void sendReply(otherNote.id)} />}</section>}
         </>}
         {page === "diario" && <><div className="dv-pagehead"><span className="dv-kicker">UM LUGAR SÓ SEU</span><h1>Meu diário</h1><p>Palavras que você pode guardar sem precisar explicar a ninguém.</p></div><div className="dv-softcard"><div className="dv-row-between"><h3>{prettyDate(day)}</h3><LockKeyhole size={19} /></div><p className="dv-muted">Sua reflexão pessoal sobre “{devotional.title}”.</p><textarea className="dv-bigtext" rows={9} maxLength={5000} value={reflection} onChange={(e) => setReflection(e.target.value)} placeholder="Escreva aqui o que gostaria de lembrar..." /><div className="dv-readingfooter"><span className="dv-muted">Somente você tem acesso a este texto.</span><button className="dv-primary" disabled={busy} onClick={() => void saveJournal()}>Salvar reflexão <Check size={17} /></button></div></div><h3 className="dv-subheading">Revisitar outros dias</h3><HistoryList history={history} onSelect={(d) => { setDay(d); go("diario"); }} /></>}
-        {page === "mensagens" && <><div className="dv-pagehead"><span className="dv-kicker">ENTRE NÓS</span><h1>Mensagens que ficam</h1><p>As palavras que foram compartilhadas com carinho, reunidas num só lugar.</p></div>{!partner ? <Empty icon={Mail} title="Uma história começa com um convite." body="Quando vocês estiverem conectados, as mensagens compartilhadas aparecerão aqui." action="Criar ou aceitar convite" onClick={() => go("perfil")} /> : inbox.length === 0 ? <Empty icon={Mail} title="Ainda não há mensagens." body="Depois do devocional de hoje, escreva seu resumo e uma palavra especial." action="Escrever primeira mensagem" onClick={() => { setReadingStep(3); go("leitura"); }} /> : <div className="dv-inbox">{inbox.map((note) => <NoteCard key={note.id} note={note} name={note.author_id === user.id ? "Você" : partner.name} me={user.id} replies={replies.filter((r) => r.note_id === note.id)} replyText={replyText[note.id] ?? ""} onChangeReply={(t) => setReplyText((r) => ({ ...r, [note.id]: t }))} onReply={() => void sendReply(note.id)} />)}</div>}<button className="dv-subtle dv-reload" onClick={() => void loadShared()}><RefreshCw size={16} /> Atualizar mensagens</button></>}
+        {page === "mensagens" && <><div className="dv-pagehead"><span className="dv-kicker">ENTRE NÓS</span><h1>Mensagens que ficam</h1><p>Um espaço reservado para Vitor e Duda conversarem sobre as leituras, os aprendizados e o que sentiram em cada dia.</p></div>{!partner ? <Empty icon={Mail} title="Uma história começa com um convite." body="Crie o espaço no dispositivo do Vitor e aprove o pedido da Duda para trocar mensagens e resumos com privacidade." action="Criar ou aceitar convite" onClick={() => go("perfil")} /> : inbox.length === 0 ? <Empty icon={Mail} title="Ainda não há mensagens." body="Depois do devocional de hoje, escreva seu resumo e uma palavra especial." action="Escrever primeira mensagem" onClick={() => { setReadingStep(3); go("leitura"); }} /> : <div className="dv-inbox">{inbox.map((note) => <NoteCard key={note.id} note={note} name={note.author_id === user.id ? "Você" : partner.name} me={user.id} replies={replies.filter((r) => r.note_id === note.id)} replyText={replyText[note.id] ?? ""} onChangeReply={(t) => setReplyText((r) => ({ ...r, [note.id]: t }))} onReply={() => void sendReply(note.id)} />)}</div>}<button className="dv-subtle dv-reload" onClick={() => void loadShared()}><RefreshCw size={16} /> Atualizar mensagens</button></>}
         {page === "jornada" && <><div className="dv-pagehead"><span className="dv-kicker">CADA DIA CONTA</span><h1>Nossa jornada</h1><p>Uma coleção de dias vividos com intenção.</p></div><div className="dv-stats"><div><strong>{history.filter((h) => h.completed_at).length}</strong><span>Devocionais concluídos</span></div><div><strong>{history.length}</strong><span>Dias registrados</span></div><div><strong>{inbox.length}</strong><span>Mensagens compartilhadas</span></div></div><section className="dv-softcard"><h3>Seus dias de luz</h3><p className="dv-muted">Toque em uma data para revisitar a leitura e suas anotações.</p><HistoryList history={history} onSelect={(d) => { setDay(d); setReadingStep(0); go("leitura"); }} /></section></>}
-        {page === "perfil" && <><div className="dv-pagehead"><span className="dv-kicker">SEU CANTINHO</span><h1>Perfil e convites</h1><p>Seu nome, seu espaço e as pessoas com quem você compartilha a jornada.</p></div><div className="dv-twocol"><section className="dv-softcard"><div className="dv-readingicon"><UserRound size={23} /></div><h3>Como podemos chamar você?</h3><label className="dv-formlabel">Nome<input value={profileName} maxLength={60} onChange={(e) => setProfileName(e.target.value)} /></label><p className="dv-muted">{localOnly ? "Anotações salvas neste dispositivo, sem necessidade de login." : "Acesso privado e sem senha."}</p><button className="dv-primary" onClick={() => void updateName()} disabled={busy}>Salvar nome <Check size={17} /></button></section><section className="dv-softcard dv-sage"><div className="dv-readingicon"><Heart size={23} /></div><h3>Nosso espaço</h3>{localOnly ? <><p>Para enviar mensagens entre dois dispositivos, é necessário ativar a conexão segura do aplicativo.</p><button className="dv-primary" disabled={busy} onClick={() => void retrySecureAccess()}>Ativar compartilhamento <ChevronRight size={17} /></button></> : partner ? <><p>Seu espaço está conectado com <strong>{partner.name}</strong>.</p><p className="dv-muted"><LockKeyhole size={14} /> As mensagens são privadas para vocês.</p></> : invite ? <><p>Um espaço reservado foi criado. Compartilhe este código para convidar alguém.</p><div className="dv-invite">{invite} <button aria-label="Copiar convite" onClick={() => copy(invite)}><Copy size={18} /></button></div></> : <><p>Crie um espaço privativo para compartilhar reflexões e mensagens com uma pessoa.</p><button className="dv-primary" disabled={busy} onClick={() => void createInvite()}>Criar convite <ChevronRight size={17} /></button></>}{!spaceId && !localOnly && <div className="dv-join"><label className="dv-formlabel">Recebeu um convite?<input value={inviteInput} maxLength={11} onChange={(e) => setInviteInput(e.target.value.toUpperCase())} placeholder="XXXXX-XXXXX" /></label><button className="dv-subtle" disabled={busy || !inviteInput.trim()} onClick={() => void joinInvite()}>Entrar com código <ChevronRight size={16} /></button></div>}</section></div></>}
+        {page === "perfil" && <><div className="dv-pagehead"><span className="dv-kicker">SEU CANTINHO</span><h1>Perfil e convites</h1><p>Seu nome, seu espaço e as pessoas com quem você compartilha a jornada.</p></div><div className="dv-twocol"><section className="dv-softcard"><div className="dv-readingicon"><UserRound size={23} /></div><h3>Como podemos chamar você?</h3><label className="dv-formlabel">Nome<input value={profileName} maxLength={60} onChange={(e) => setProfileName(e.target.value)} /></label><p className="dv-muted">{localOnly ? "Anotações salvas neste dispositivo, sem necessidade de login." : "Acesso privado e sem senha."}</p><button className="dv-primary" onClick={() => void updateName()} disabled={busy}>Salvar nome <Check size={17} /></button></section><section className="dv-softcard dv-sage"><div className="dv-readingicon"><Heart size={23} /></div><h3>Nosso espaço</h3>{localOnly ? <><p>Para enviar mensagens entre dois dispositivos, é necessário ativar a conexão segura do aplicativo.</p><button className="dv-primary" disabled={busy} onClick={() => void retrySecureAccess()}>Ativar compartilhamento <ChevronRight size={17} /></button></> : partner ? <><p>Seu espaço está conectado com <strong>{partner.name}</strong>. Agora só vocês dois podem ler e responder às mensagens compartilhadas.</p><p className="dv-muted"><LockKeyhole size={14} /> As mensagens são privadas para vocês.</p></> : invite ? <><p>Este espaço aceita apenas mais um dispositivo. Envie o código somente para Duda, e aprove a solicitação dela antes de começar a conversa.</p><div className="dv-invite">{invite} <button aria-label="Copiar convite" onClick={() => copy(invite)}><Copy size={18} /></button></div></> : <><p>Vitor, crie um espaço privado e envie o código à Duda. Ela precisará solicitar a entrada, e você deverá aprová-la.</p><button className="dv-primary" disabled={busy} onClick={() => void createInvite()}>Criar convite <ChevronRight size={17} /></button></>}{!spaceId && !localOnly && <div className="dv-join"><label className="dv-formlabel">Duda, recebeu o código do Vitor?<input value={inviteInput} maxLength={11} onChange={(e) => setInviteInput(e.target.value.toUpperCase())} placeholder="XXXXX-XXXXX" /></label><button className="dv-subtle" disabled={busy || !inviteInput.trim()} onClick={() => void joinInvite()}>Pedir acesso <ChevronRight size={16} /></button></div>}{!spaceId && !localOnly && myJoinRequest && <div className="dv-request-info"><LockKeyhole size={17} /><div><strong>Pedido aguardando aprovação</strong><p>O Vitor precisa confirmar seu dispositivo. Após a aprovação, as mensagens e resumos compartilhados aparecerão aqui.</p><button className="dv-subtle" onClick={() => void refresh()}><RefreshCw size={15} /> Conferir aprovação</button></div></div>}
+{spaceId && !partner && joinRequests.length > 0 && <div className="dv-request-panel"><span className="dv-kicker">CONTROLE DE ACESSO</span><h4>Pedido de entrada</h4><p>Confirme pessoalmente que o pedido abaixo foi feito pela Duda. O nome exibido não comprova quem está solicitando.</p>{joinRequests.map((request) => <div key={request.id} className="dv-request-entry"><div><strong>{request.requester_name}</strong><small>Quer entrar no espaço privado</small></div><div className="dv-request-actions"><button className="dv-subtle" disabled={busy} onClick={() => void decideJoin(request, false)}>Recusar</button><button className="dv-primary" disabled={busy} onClick={() => void decideJoin(request, true)}><Check size={15} /> Aprovar</button></div></div>)}</div>}
+{spaceId && !partner && <button className="dv-subtle dv-reload" onClick={() => void refresh()}><RefreshCw size={15} /> Verificar pedidos</button>}</section></div></>}
       </main>
       <footer className="dv-footer"><Leaf size={16} /> Um dia de cada vez, com fé e intenção. <span>Feito com cuidado ♡</span></footer>
       <nav className="dv-mobile-nav" aria-label="Navegação móvel">{navigation.filter((n) => n.key !== "leitura").map(({ key, label, icon: Icon }) => <button key={key} className={page === key ? "selected" : ""} onClick={() => go(key)}><Icon size={21} /><span>{label === "Nossa jornada" ? "Jornada" : label === "Meu diário" ? "Diário" : label}</span></button>)}</nav>
